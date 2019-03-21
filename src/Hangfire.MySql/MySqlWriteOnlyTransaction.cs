@@ -181,7 +181,8 @@ $@";merge `{_storage.SchemaName}`.`Set` as Target
 using (VALUES (@key, @value, @score)) as Source (`Key`, Value, Score)
 on Target.`Key` = Source.`Key` and Target.Value = Source.Value
 when matched then update set Score = Source.Score
-when not matched then insert (`Key`, Value, Score) values (Source.`Key`, Source.Value, Source.Score);";
+INSERT INTO `{_storage.SchemaName}`.`Set`(`Key`, Value, Score) values (@key, @value, @score)
+ON DUPLICATE KEY UPDATE Score = @score;";
 
             AcquireSetLock();
             QueueCommand(addSql,
