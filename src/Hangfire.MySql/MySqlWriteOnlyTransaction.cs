@@ -39,7 +39,7 @@ namespace Hangfire.MySql
                     foreach (var lockedResource in _lockedResources)
                     {
                         commandBatch.Append(
-                            "exec sp_getapplock @Resource=@resource, @LockMode=N'Exclusive'",
+                            "exec GET_LOCK @Resource=@resource, @LockMode=N'Exclusive'",
                             new MySqlParameter("@resource", lockedResource));
                     }
 

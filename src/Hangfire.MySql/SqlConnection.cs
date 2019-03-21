@@ -267,7 +267,7 @@ when not matched then insert (`Key`, Field, Value) values (Source.`Key`, Source.
                 using (var commandBatch = new SqlCommandBatch(preferBatching: _storage.CommandBatchMaxTimeout.HasValue))
                 {
                     commandBatch.Append(
-                        "SET XACT_ABORT ON;exec sp_getapplock @Resource=@resource, @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=-1;",
+                        "SET XACT_ABORT ON;exec GET_LOCK @Resource=@resource, @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=-1;",
                         new MySqlParameter("@resource", lockResourceKey));
 
                     foreach (var keyValuePair in keyValuePairs)
@@ -279,7 +279,7 @@ when not matched then insert (`Key`, Field, Value) values (Source.`Key`, Source.
                     }
 
                     commandBatch.Append(
-                        "exec sp_releaseapplock @Resource=@resource, @LockOwner=N'Transaction';",
+                        "exec RELEASE_LOCK @Resource=@resource, @LockOwner=N'Transaction';",
                         new MySqlParameter("@resource", lockResourceKey));
 
                     commandBatch.Connection = connection;

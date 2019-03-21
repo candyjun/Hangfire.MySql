@@ -39,7 +39,7 @@ namespace Hangfire.MySql
 
             var started = Stopwatch.StartNew();
 
-            // We can't pass our timeout directly to the sp_getapplock stored procedure, because
+            // We can't pass our timeout directly to the GET_LOCK stored procedure, because
             // high values, such as minute or more, may cause SQL Server's thread pool starvation,
             // when the number of connections that try to acquire a lock is more than the number of 
             // available threads in SQL Server. In this case a deadlock will occur, when SQL Server 
@@ -61,7 +61,7 @@ namespace Hangfire.MySql
                 parameters.Add("@Result", dbType: DbType.Int32, direction: ParameterDirection.ReturnValue);
 
                 connection.Execute(
-                    @"sp_getapplock",
+                    @"GET_LOCK",
                     parameters,
                     commandTimeout: (int) (lockTimeout / 1000) + 5,
                     commandType: CommandType.StoredProcedure);
@@ -92,7 +92,7 @@ namespace Hangfire.MySql
             parameters.Add("@Result", dbType: DbType.Int32, direction: ParameterDirection.ReturnValue);
 
             connection.Execute(
-                @"sp_releaseapplock",
+                @"RELEASE_LOCK",
                 parameters,
                 commandType: CommandType.StoredProcedure);
 
