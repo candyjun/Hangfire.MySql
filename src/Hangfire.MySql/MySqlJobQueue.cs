@@ -1,13 +1,11 @@
+using Hangfire.Annotations;
+using Hangfire.Common;
+using Hangfire.Storage;
 using System;
 using System.Data;
 using System.Data.Common;
 using System.Globalization;
-using System.Linq;
 using System.Threading;
-using Dapper;
-using Hangfire.Annotations;
-using Hangfire.Common;
-using Hangfire.Storage;
 
 namespace Hangfire.MySql
 {
@@ -23,11 +21,8 @@ namespace Hangfire.MySql
 
         public MySqlJobQueue([NotNull] MySqlStorage storage, MySqlStorageOptions options)
         {
-            if (storage == null) throw new ArgumentNullException(nameof(storage));
-            if (options == null) throw new ArgumentNullException(nameof(options));
-
-            _storage = storage;
-            _options = options;
+            _storage = storage ?? throw new ArgumentNullException(nameof(storage));
+            _options = options ?? throw new ArgumentNullException(nameof(options));
         }
 
         [NotNull]
@@ -46,14 +41,7 @@ namespace Hangfire.MySql
 
         public void Enqueue(DbConnection connection, DbTransaction transaction, string queue, string jobId)
         {
-            string enqueueJobSql =
-$@"insert into `{_storage.SchemaName}`.JobQueue (JobId, Queue) values (@jobId, @queue)";
-
-            connection.Execute(
-                enqueueJobSql, 
-                new { jobId = long.Parse(jobId), queue = queue }
-                , transaction
-                , commandTimeout: _storage.CommandTimeout);
+            SqlRepository.AddJobQueue(connection, _storage.SchemaName, _storage.CommandTimeout, transaction, queue, jobId);
         }
 
         private MySqlTimeoutJob DequeueUsingSlidingInvisibilityTimeout(string[] queues, CancellationToken cancellationToken)
@@ -63,15 +51,6 @@ $@"insert into `{_storage.SchemaName}`.JobQueue (JobId, Queue) values (@jobId, @
 
             FetchedJob fetchedJob = null;
 
-            var fetchJobSqlTemplate = $@"
-set transaction isolation level read committed
-update top (1) JQ
-set FetchedAt = GETUTCDATE()
-output INSERTED.Id, INSERTED.JobId, INSERTED.Queue
-from `{_storage.SchemaName}`.JobQueue JQ
-where Queue in @queues and
-(FetchedAt is null or FetchedAt < DATEADD(second, @timeout, GETUTCDATE()))";
-
             using (var cancellationEvent = cancellationToken.GetCancellationEvent())
             {
                 do
@@ -80,11 +59,8 @@ where Queue in @queues and
 
                     _storage.UseConnection(null, connection =>
                     {
-                        fetchedJob = connection
-                            .Query<FetchedJob>(
-                                fetchJobSqlTemplate,
-                                new { queues = queues, timeout = _options.SlidingInvisibilityTimeout.Value.Negate().TotalSeconds })
-                            .SingleOrDefault();
+                        fetchedJob = SqlRepository.GetFetchedJob<FetchedJob>(connection, _storage.SchemaName, queues,
+                            _options.SlidingInvisibilityTimeout.Value.Negate().TotalSeconds);
                     });
 
                     if (fetchedJob != null)
@@ -107,12 +83,6 @@ where Queue in @queues and
             FetchedJob fetchedJob = null;
             DbTransaction transaction = null;
 
-            string fetchJobSqlTemplate =
-                $@"delete top (1) JQ
-output DELETED.Id, DELETED.JobId, DELETED.Queue
-from `{_storage.SchemaName}`.JobQueue JQ
-where Queue in @queues and (FetchedAt is null or FetchedAt < DATEADD(second, @timeout, GETUTCDATE()))";
-
             using (var cancellationEvent = cancellationToken.GetCancellationEvent())
             {
                 do
@@ -124,14 +94,12 @@ where Queue in @queues and (FetchedAt is null or FetchedAt < DATEADD(second, @ti
                     {
                         transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
 
-                        fetchedJob = connection.Query<FetchedJob>(
-                            fetchJobSqlTemplate,
+                        fetchedJob = SqlRepository.GetFetchedJobUsingTransaction<FetchedJob>(connection, _storage.SchemaName,
+                            queues,
 #pragma warning disable 618
-                        new { queues = queues, timeout = _options.InvisibilityTimeout.Negate().TotalSeconds },
+                        _options.InvisibilityTimeout.Negate().TotalSeconds,
 #pragma warning restore 618
-                        transaction,
-                            commandTimeout: _storage.CommandTimeout).SingleOrDefault();
-
+                            transaction, _storage.CommandTimeout);
                         if (fetchedJob != null)
                         {
                             return new MySqlTransactionJob(

@@ -5,7 +5,6 @@ using Hangfire.Common;
 using Hangfire.Logging;
 using Hangfire.Server;
 using Hangfire.Storage;
-using MySql.Data.MySqlClient;
 
 namespace Hangfire.MySql
 {
@@ -38,9 +37,7 @@ namespace Hangfire.MySql
 
         public ExpirationManager(MySqlStorage storage, TimeSpan checkInterval)
         {
-            if (storage == null) throw new ArgumentNullException(nameof(storage));
-
-            _storage = storage;
+            _storage = storage ?? throw new ArgumentNullException(nameof(storage));
             _checkInterval = checkInterval;
         }
 
@@ -56,12 +53,7 @@ namespace Hangfire.MySql
 
                     do
                     {
-                        affected = ExecuteNonQuery(
-                            connection,
-                            GetQuery(_storage.SchemaName, table),
-                            cancellationToken,
-                            new MySqlParameter("@count", NumberOfRecordsInSinglePass),
-                            new MySqlParameter("@now", DateTime.UtcNow));
+                        affected = SqlRepository.RemovingOutdatedRecords(connection, _storage.SchemaName, table, NumberOfRecordsInSinglePass, DateTime.UtcNow, cancellationToken);
 
                     } while (affected == NumberOfRecordsInSinglePass);
                 });
@@ -104,64 +96,6 @@ namespace Hangfire.MySql
                     () => $@"An exception was thrown during acquiring distributed lock on the {DistributedLockKey} resource within {DefaultLockTimeout.TotalSeconds} seconds. Outdated records were not removed.
 It will be retried in {_checkInterval.TotalSeconds} seconds.",
                     e);
-            }
-        }
-
-        private static string GetQuery(string schemaName, string table)
-        {
-            // Okay, let me explain all the bells and whistles in this query:
-            //
-            // SET TRANSACTION... is to prevent a query from running, when a
-            // higher isolation level was set, for example, when it was leaked:
-            // http://www.levibotelho.com/development/plugging-isolation-leaks-in-sql-server.
-            //
-            // LOOP JOIN hint is here to prevent merge or hash joins, that
-            // cause index scan operators, and they are unacceptable, because
-            // may block running background jobs.
-            //
-            // OPTIMIZE FOR instructs engine to generate better plan that
-            // causes much fewer logical reads, because of additional sorting
-            // before querying data in nested loops. The value was discovered
-            // in practice.
-            //
-            // READPAST hint is used to simply skip blocked records, because
-            // it's better to ignore them instead of waiting for unlock.
-            //
-            // TOP is to prevent lock escalations that may cause background
-            // processing to stop, and to avoid larger batches to rollback
-            // in case of connection/process termination.
-
-            return
-$@"set transaction isolation level read committed;
-delete top (@count) from `{schemaName}`.`{table}` 
-where ExpireAt < @now
-option (loop join, optimize for (@count = 20000));";
-        }
-
-        private static int ExecuteNonQuery(
-            DbConnection connection,
-            string commandText,
-            CancellationToken cancellationToken,
-            params MySqlParameter[] parameters)
-        {
-            using (var command = connection.CreateCommand())
-            {
-                command.CommandText = commandText;
-                command.Parameters.AddRange(parameters);
-                command.CommandTimeout = 0;
-
-                using (cancellationToken.Register(state => ((MySqlCommand)state).Cancel(), command))
-                {
-                    try
-                    {
-                        return command.ExecuteNonQuery();
-                    }
-                    catch (MySqlException) when (cancellationToken.IsCancellationRequested)
-                    {
-                        // Exception was triggered due to the Cancel method call, ignoring
-                        return 0;
-                    }
-                }
             }
         }
     }

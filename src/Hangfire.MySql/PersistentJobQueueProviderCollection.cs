@@ -15,9 +15,7 @@ namespace Hangfire.MySql
 
         public PersistentJobQueueProviderCollection(IPersistentJobQueueProvider defaultProvider)
         {
-            if (defaultProvider == null) throw new ArgumentNullException(nameof(defaultProvider));
-
-            _defaultProvider = defaultProvider;
+            _defaultProvider = defaultProvider ?? throw new ArgumentNullException(nameof(defaultProvider));
 
             _providers.Add(_defaultProvider);
         }

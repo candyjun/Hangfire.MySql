@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Threading;
-using Dapper;
 using Hangfire.Common;
 using Hangfire.Logging;
 using Hangfire.Server;
@@ -23,9 +22,7 @@ namespace Hangfire.MySql
 
         public CountersAggregator(MySqlStorage storage, TimeSpan interval)
         {
-            if (storage == null) throw new ArgumentNullException(nameof(storage));
-
-            _storage = storage;
+            _storage = storage ?? throw new ArgumentNullException(nameof(storage));
             _interval = interval;
         }
 
@@ -39,10 +36,7 @@ namespace Hangfire.MySql
             {
                 _storage.UseConnection(null, connection =>
                 {
-                    removedCount = connection.Execute(
-                        GetAggregationQuery(_storage),
-                        new { now = DateTime.UtcNow, count = NumberOfRecordsInSinglePass },
-                        commandTimeout: 0);
+                    removedCount = SqlRepository.GetAggregation(connection, _storage.SchemaName, NumberOfRecordsInSinglePass);
                 });
 
                 if (removedCount >= NumberOfRecordsInSinglePass)
@@ -61,29 +55,6 @@ namespace Hangfire.MySql
         public override string ToString()
         {
             return GetType().ToString();
-        }
-
-        private static string GetAggregationQuery(MySqlStorage storage)
-        {
-            return @"
-SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
-START TRANSACTION;
-
-INSERT INTO  " + storage.SchemaName + @"_AggregatedCounter (`Key`, Value, ExpireAt)
-    SELECT `Key`, SUM(Value) as Value, MAX(ExpireAt) AS ExpireAt 
-    FROM (
-            SELECT `Key`, Value, ExpireAt
-            FROM  " + storage.SchemaName + @"_Counter
-            LIMIT @count) tmp
-	GROUP BY `Key`
-        ON DUPLICATE KEY UPDATE 
-            Value = Value + VALUES(Value),
-            ExpireAt = GREATEST(ExpireAt,VALUES(ExpireAt));
-
-DELETE FROM `" + storage.SchemaName + @"_Counter`
-LIMIT @count;
-
-COMMIT;";
         }
     }
 }

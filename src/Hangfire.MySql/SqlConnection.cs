@@ -1,16 +1,15 @@
-﻿using System;
+﻿using Hangfire.Annotations;
+using Hangfire.Common;
+using Hangfire.MySql.Entities;
+using Hangfire.Server;
+using Hangfire.Storage;
+using MySql.Data.MySqlClient;
+using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using System.Linq;
 using System.Threading;
-using Dapper;
-using Hangfire.Annotations;
-using Hangfire.Common;
-using Hangfire.Server;
-using Hangfire.MySql.Entities;
-using Hangfire.Storage;
-using MySql.Data.MySqlClient;
 
 namespace Hangfire.MySql
 {
@@ -21,8 +20,7 @@ namespace Hangfire.MySql
 
         public SqlConnection([NotNull] MySqlStorage storage)
         {
-            if (storage == null) throw new ArgumentNullException(nameof(storage));
-            _storage = storage;
+            _storage = storage ?? throw new ArgumentNullException(nameof(storage));
         }
 
         public override void Dispose()
@@ -41,7 +39,7 @@ namespace Hangfire.MySql
 
         public override IDisposable AcquireDistributedLock([NotNull] string resource, TimeSpan timeout)
         {
-            if (String.IsNullOrWhiteSpace(resource)) throw new ArgumentNullException(nameof(resource));
+            if (string.IsNullOrWhiteSpace(resource)) throw new ArgumentNullException(nameof(resource));
             return AcquireLock($"{_storage.SchemaName}:{resource}", timeout);
         }
 
@@ -57,7 +55,7 @@ namespace Hangfire.MySql
             if (providers.Length != 1)
             {
                 throw new InvalidOperationException(
-                    $"Multiple provider instances registered for queues: {String.Join(", ", queues)}. You should choose only one type of persistent queues per server instance.");
+                    $"Multiple provider instances registered for queues: {string.Join(", ", queues)}. You should choose only one type of persistent queues per server instance.");
             }
             
             var persistentQueue = providers[0].GetJobQueue();
@@ -73,33 +71,18 @@ namespace Hangfire.MySql
             if (job == null) throw new ArgumentNullException(nameof(job));
             if (parameters == null) throw new ArgumentNullException(nameof(parameters));
 
-            string createJobSql =
-$@"insert into `{_storage.SchemaName}`.Job (InvocationData, Arguments, CreatedAt, ExpireAt)
-output inserted.Id
-values (@invocationData, @arguments, @createdAt, @expireAt)";
-
             var invocationData = InvocationData.Serialize(job);
 
             return _storage.UseConnection(_dedicatedConnection, connection =>
             {
-                var jobId = connection.ExecuteScalar<long>(
-                    createJobSql,
-                    new
-                    {
-                        invocationData = JobHelper.ToJson(invocationData),
-                        arguments = invocationData.Arguments,
-                        createdAt = createdAt,
-                        expireAt = createdAt.Add(expireIn)
-                    },
-                    commandTimeout: _storage.CommandTimeout).ToString();
+                var jobId = SqlRepository.CreateExpiredJob(connection, _storage.SchemaName, _storage.CommandTimeout,
+                    JobHelper.ToJson(invocationData), invocationData.Arguments, createdAt, createdAt.Add(expireIn));
 
                 if (parameters.Count > 0)
                 {
-                    string insertParameterSql =
-$@"insert into `{_storage.SchemaName}`.JobParameter (JobId, Name, Value)
-values (@jobId, @name, @value)";
+                    string insertParameterSql = SqlRepository.GetInsertParameterSql(_storage.SchemaName);
 
-                    using (var commandBatch = new SqlCommandBatch(preferBatching: _storage.CommandBatchMaxTimeout.HasValue))
+                    using (var commandBatch = new SqlCommandBatch())
                     {
 
                         foreach (var parameter in parameters)
@@ -126,13 +109,9 @@ values (@jobId, @name, @value)";
         {
             if (id == null) throw new ArgumentNullException(nameof(id));
 
-            string sql =
-$@"select InvocationData, StateName, Arguments, CreatedAt from `{_storage.SchemaName}`.Job  where Id = @id";
-
             return _storage.UseConnection(_dedicatedConnection, connection =>
             {
-                var jobData = connection.Query<SqlJob>(sql, new { id = long.Parse(id) }, commandTimeout: _storage.CommandTimeout)
-                    .SingleOrDefault();
+                var jobData = SqlRepository.GetJobData(connection, _storage.SchemaName, _storage.CommandTimeout, long.Parse(id));
 
                 if (jobData == null) return null;
 
@@ -166,15 +145,9 @@ $@"select InvocationData, StateName, Arguments, CreatedAt from `{_storage.Schema
         {
             if (jobId == null) throw new ArgumentNullException(nameof(jobId));
 
-            string sql = 
-$@"select s.Name, s.Reason, s.Data
-from `{_storage.SchemaName}`.State s 
-inner join `{_storage.SchemaName}`.Job j  on j.StateId = s.Id and j.Id = s.JobId
-where j.Id = @jobId";
-
             return _storage.UseConnection(_dedicatedConnection, connection =>
             {
-                var sqlState = connection.Query<SqlState>(sql, new { jobId = long.Parse(jobId) }, commandTimeout: _storage.CommandTimeout).SingleOrDefault();
+                var sqlState = SqlRepository.GetStateData(connection, _storage.SchemaName, _storage.CommandTimeout, long.Parse(jobId));
                 if (sqlState == null)
                 {
                     return null;
@@ -200,14 +173,7 @@ where j.Id = @jobId";
 
             _storage.UseConnection(_dedicatedConnection, connection =>
             {
-                connection.Execute(
-$@";merge `{_storage.SchemaName}`.JobParameter as Target
-using (VALUES (@jobId, @name, @value)) as Source (JobId, Name, Value) 
-on Target.JobId = Source.JobId AND Target.Name = Source.Name
-when matched then update set Value = Source.Value
-when not matched then insert (JobId, Name, Value) values (Source.JobId, Source.Name, Source.Value);",
-                    new { jobId = long.Parse(id), name, value },
-                    commandTimeout: _storage.CommandTimeout);
+                SqlRepository.SetJobParameter(connection, _storage.SchemaName, _storage.CommandTimeout, long.Parse(id), name, value);
             });
         }
 
@@ -216,10 +182,9 @@ when not matched then insert (JobId, Name, Value) values (Source.JobId, Source.N
             if (id == null) throw new ArgumentNullException(nameof(id));
             if (name == null) throw new ArgumentNullException(nameof(name));
 
-            return _storage.UseConnection(_dedicatedConnection, connection => connection.ExecuteScalar<string>(
-                $@"select top (1) Value from `{_storage.SchemaName}`.JobParameter  where JobId = @id and Name = @name",
-                new { id = long.Parse(id), name = name },
-                commandTimeout: _storage.CommandTimeout));
+            return _storage.UseConnection(_dedicatedConnection, connection => SqlRepository.GetJobParameter(
+               connection, _storage.SchemaName, _storage.CommandTimeout,
+                long.Parse(id), name));
         }
 
         public override HashSet<string> GetAllItemsFromSet(string key)
@@ -228,10 +193,8 @@ when not matched then insert (JobId, Name, Value) values (Source.JobId, Source.N
 
             return _storage.UseConnection(_dedicatedConnection, connection =>
             {
-                var result = connection.Query<string>(
-                    $@"select Value from `{_storage.SchemaName}`.`Set`  where `Key` = @key",
-                    new { key },
-                    commandTimeout: _storage.CommandTimeout);
+                var result = SqlRepository.GetAllItemsFromSet(
+                    connection, _storage.SchemaName, _storage.CommandTimeout, key);
 
                 return new HashSet<string>(result);
             });
@@ -242,10 +205,8 @@ when not matched then insert (JobId, Name, Value) values (Source.JobId, Source.N
             if (key == null) throw new ArgumentNullException(nameof(key));
             if (toScore < fromScore) throw new ArgumentException("The `toScore` value must be higher or equal to the `fromScore` value.");
 
-            return _storage.UseConnection(_dedicatedConnection, connection => connection.ExecuteScalar<string>(
-                $@"select top 1 Value from `{_storage.SchemaName}`.`Set`  where `Key` = @key and Score between @from and @to order by Score",
-                new { key, from = fromScore, to = toScore },
-                commandTimeout: _storage.CommandTimeout));
+            return _storage.UseConnection(_dedicatedConnection, connection => SqlRepository.GetFirstByLowestScoreFromSet(
+                connection, _storage.SchemaName, _storage.CommandTimeout, key, fromScore, toScore));
         }
 
         public override void SetRangeInHash(string key, IEnumerable<KeyValuePair<string, string>> keyValuePairs)
@@ -253,21 +214,16 @@ when not matched then insert (JobId, Name, Value) values (Source.JobId, Source.N
             if (key == null) throw new ArgumentNullException(nameof(key));
             if (keyValuePairs == null) throw new ArgumentNullException(nameof(keyValuePairs));
 
-            var sql =
-$@";merge `{_storage.SchemaName}`.Hash as Target
-using (VALUES (@key, @field, @value)) as Source (`Key`, Field, Value)
-on Target.`Key` = Source.`Key` and Target.Field = Source.Field
-when matched then update set Value = Source.Value
-when not matched then insert (`Key`, Field, Value) values (Source.`Key`, Source.Field, Source.Value);";
+            var sql = SqlRepository.GetSetRangeInHashSql(_storage.SchemaName);
 
             var lockResourceKey = $"{_storage.SchemaName}:Hash:Lock";
 
             _storage.UseTransaction(_dedicatedConnection, (connection, transaction) =>
             {
-                using (var commandBatch = new SqlCommandBatch(preferBatching: _storage.CommandBatchMaxTimeout.HasValue))
+                using (var commandBatch = new SqlCommandBatch())
                 {
                     commandBatch.Append(
-                        "SET XACT_ABORT ON;exec GET_LOCK @Resource=@resource, @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=-1;",
+                        SqlRepository.GetLockResourceKeySql(),
                         new MySqlParameter("@resource", lockResourceKey));
 
                     foreach (var keyValuePair in keyValuePairs)
@@ -279,7 +235,7 @@ when not matched then insert (`Key`, Field, Value) values (Source.`Key`, Source.
                     }
 
                     commandBatch.Append(
-                        "exec RELEASE_LOCK @Resource=@resource, @LockOwner=N'Transaction';",
+                        SqlRepository.GetReleaseLockResourceKeySql(),
                         new MySqlParameter("@resource", lockResourceKey));
 
                     commandBatch.Connection = connection;
@@ -298,11 +254,7 @@ when not matched then insert (`Key`, Field, Value) values (Source.`Key`, Source.
 
             return _storage.UseConnection(_dedicatedConnection, connection =>
             {
-                var result = connection.Query<SqlHash>(
-                    $"select Field, Value from `{_storage.SchemaName}`.Hash where `Key` = @key",
-                    new { key },
-                    commandTimeout: _storage.CommandTimeout)
-                    .ToDictionary(x => x.Field, x => x.Value);
+                var result = SqlRepository.GetAllEntriesFromHash(connection, _storage.SchemaName, _storage.CommandTimeout, key);
 
                 return result.Count != 0 ? result : null;
             });
@@ -322,14 +274,7 @@ when not matched then insert (`Key`, Field, Value) values (Source.`Key`, Source.
 
             _storage.UseConnection(_dedicatedConnection, connection =>
             {
-                connection.Execute(
-$@";merge `{_storage.SchemaName}`.Server as Target
-using (VALUES (@id, @data, @heartbeat)) as Source (Id, Data, Heartbeat)
-on Target.Id = Source.Id
-when matched then update set Data = Source.Data, LastHeartbeat = Source.Heartbeat
-when not matched then insert (Id, Data, LastHeartbeat) values (Source.Id, Source.Data, Source.Heartbeat);",
-                    new { id = serverId, data = JobHelper.ToJson(data), heartbeat = DateTime.UtcNow },
-                    commandTimeout: _storage.CommandTimeout);
+                SqlRepository.AnnounceServer(connection, _storage.SchemaName, _storage.CommandTimeout, serverId, JobHelper.ToJson(data), DateTime.UtcNow);
             });
         }
 
@@ -339,10 +284,7 @@ when not matched then insert (Id, Data, LastHeartbeat) values (Source.Id, Source
 
             _storage.UseConnection(_dedicatedConnection, connection =>
             {
-                connection.Execute(
-                    $@"delete from `{_storage.SchemaName}`.Server where Id = @id",
-                    new { id = serverId },
-                    commandTimeout: _storage.CommandTimeout);
+                SqlRepository.RemoveServer(connection, _storage.SchemaName, _storage.CommandTimeout, serverId);
             });
         }
 
@@ -352,10 +294,7 @@ when not matched then insert (Id, Data, LastHeartbeat) values (Source.Id, Source
 
             _storage.UseConnection(_dedicatedConnection, connection =>
             {
-                connection.Execute(
-                    $@"update `{_storage.SchemaName}`.Server set LastHeartbeat = @now where Id = @id",
-                    new { now = DateTime.UtcNow, id = serverId },
-                    commandTimeout: _storage.CommandTimeout);
+                SqlRepository.Heartbeat(connection, _storage.SchemaName, _storage.CommandTimeout, serverId, DateTime.UtcNow);
             });
         }
 
@@ -366,47 +305,34 @@ when not matched then insert (Id, Data, LastHeartbeat) values (Source.Id, Source
                 throw new ArgumentException("The `timeOut` value must be positive.", nameof(timeOut));
             }
 
-            return _storage.UseConnection(_dedicatedConnection, connection => connection.Execute(
-                $@"delete from `{_storage.SchemaName}`.Server where LastHeartbeat < @timeOutAt",
-                new { timeOutAt = DateTime.UtcNow.Add(timeOut.Negate()) },
-                commandTimeout: _storage.CommandTimeout));
+            return _storage.UseConnection(_dedicatedConnection, connection =>
+            SqlRepository.RemoveTimedOutServers(
+                connection, _storage.SchemaName, _storage.CommandTimeout, DateTime.UtcNow.Add(timeOut.Negate())));
         }
 
         public override long GetSetCount(string key)
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            return _storage.UseConnection(_dedicatedConnection, connection => connection.Query<int>(
-                $"select count(`Key`) from `{_storage.SchemaName}`.`Set`  where `Key` = @key",
-                new { key = key },
-                commandTimeout: _storage.CommandTimeout).First());
+            return _storage.UseConnection(_dedicatedConnection, connection =>
+            SqlRepository.GetSetCount(connection, _storage.SchemaName, _storage.CommandTimeout, key));
         }
 
         public override List<string> GetRangeFromSet(string key, int startingFrom, int endingAt)
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query =
-$@"select `Value` from (
-	select `Value`, row_number() over (order by `Key` ASC) as row_num
-	from `{_storage.SchemaName}`.`Set` 
-	where `Key` = @key 
-) as s where s.row_num between @startingFrom and @endingAt";
-
-            return _storage.UseConnection(_dedicatedConnection, connection => connection
-                .Query<string>(query, new { key = key, startingFrom = startingFrom + 1, endingAt = endingAt + 1 }, commandTimeout: _storage.CommandTimeout)
-                .ToList());
+            return _storage.UseConnection(_dedicatedConnection, connection =>
+            SqlRepository.GetRangeFromSet(connection, _storage.SchemaName, _storage.CommandTimeout, key, startingFrom, endingAt));
         }
 
         public override TimeSpan GetSetTtl(string key)
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query = $@"select min(`ExpireAt`) from `{_storage.SchemaName}`.`Set`  where `Key` = @key";
-
             return _storage.UseConnection(_dedicatedConnection, connection =>
             {
-                var result = connection.ExecuteScalar<DateTime?>(query, new { key = key }, commandTimeout: _storage.CommandTimeout);
+                var result = SqlRepository.GetSetTtl(connection, _storage.SchemaName, _storage.CommandTimeout, key);
                 if (!result.HasValue) return TimeSpan.FromSeconds(-1);
 
                 return result.Value - DateTime.UtcNow;
@@ -417,36 +343,25 @@ $@"select `Value` from (
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query = 
-$@"select sum(s.`Value`) from (select sum(`Value`) as `Value` from `{_storage.SchemaName}`.Counter 
-where `Key` = @key
-union all
-select `Value` from `{_storage.SchemaName}`.AggregatedCounter 
-where `Key` = @key) as s";
-
-            return _storage.UseConnection(_dedicatedConnection, connection => 
-                connection.ExecuteScalar<long?>(query, new { key = key }, commandTimeout: _storage.CommandTimeout) ?? 0);
+            return _storage.UseConnection(_dedicatedConnection, connection =>
+                SqlRepository.GetCounter(connection, _storage.SchemaName, _storage.CommandTimeout, key) ?? 0);
         }
 
         public override long GetHashCount(string key)
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query = $@"select count(*) from `{_storage.SchemaName}`.Hash  where `Key` = @key";
-
-            return _storage.UseConnection(_dedicatedConnection, connection => 
-                connection.ExecuteScalar<long>(query, new { key = key }, commandTimeout: _storage.CommandTimeout));
+            return _storage.UseConnection(_dedicatedConnection, connection =>
+                SqlRepository.GetHashCount(connection, _storage.SchemaName, _storage.CommandTimeout, key));
         }
 
         public override TimeSpan GetHashTtl(string key)
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query = $@"select min(`ExpireAt`) from `{_storage.SchemaName}`.Hash  where `Key` = @key";
-
             return _storage.UseConnection(_dedicatedConnection, connection =>
             {
-                var result = connection.ExecuteScalar<DateTime?>(query, new { key = key }, commandTimeout: _storage.CommandTimeout);
+                var result = SqlRepository.GetHashTtl(connection, _storage.SchemaName, _storage.CommandTimeout, key);
                 if (!result.HasValue) return TimeSpan.FromSeconds(-1);
 
                 return result.Value - DateTime.UtcNow;
@@ -458,37 +373,25 @@ where `Key` = @key) as s";
             if (key == null) throw new ArgumentNullException(nameof(key));
             if (name == null) throw new ArgumentNullException(nameof(name));
 
-            string query =
-$@"select `Value` from `{_storage.SchemaName}`.Hash 
-where `Key` = @key and `Field` = @field";
-
-            return _storage.UseConnection(_dedicatedConnection, connection => connection
-                .ExecuteScalar<string>(query, new { key = key, field = name }, commandTimeout: _storage.CommandTimeout));
+            return _storage.UseConnection(_dedicatedConnection, connection =>
+            SqlRepository.GetValueFromHash(connection, _storage.SchemaName, _storage.CommandTimeout, key, name));
         }
 
         public override long GetListCount(string key)
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query = 
-$@"select count(`Id`) from `{_storage.SchemaName}`.List 
-where `Key` = @key";
-
-            return _storage.UseConnection(_dedicatedConnection, connection => 
-                connection.ExecuteScalar<long>(query, new { key = key }, commandTimeout: _storage.CommandTimeout));
+            return _storage.UseConnection(_dedicatedConnection, connection =>
+                SqlRepository.GetListCount(connection, _storage.SchemaName, _storage.CommandTimeout, key));
         }
 
         public override TimeSpan GetListTtl(string key)
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query = 
-$@"select min(`ExpireAt`) from `{_storage.SchemaName}`.List 
-where `Key` = @key";
-
             return _storage.UseConnection(_dedicatedConnection, connection =>
             {
-                var result = connection.ExecuteScalar<DateTime?>(query, new { key = key }, commandTimeout: _storage.CommandTimeout);
+                var result = SqlRepository.GetListTtl(connection, _storage.SchemaName, _storage.CommandTimeout, key);
                 if (!result.HasValue) return TimeSpan.FromSeconds(-1);
 
                 return result.Value - DateTime.UtcNow;
@@ -499,28 +402,16 @@ where `Key` = @key";
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query =
-$@"select `Value` from (
-	select `Value`, row_number() over (order by `Id` desc) as row_num 
-	from `{_storage.SchemaName}`.List 
-	where `Key` = @key 
-) as s where s.row_num between @startingFrom and @endingAt";
-
-            return _storage.UseConnection(_dedicatedConnection, connection => connection
-                .Query<string>(query, new { key = key, startingFrom = startingFrom + 1, endingAt = endingAt + 1 }, commandTimeout: _storage.CommandTimeout)
-                .ToList());
+            return _storage.UseConnection(_dedicatedConnection, connection =>
+            SqlRepository.GetRangeFromList(connection, _storage.SchemaName, _storage.CommandTimeout, key, startingFrom, endingAt));
         }
 
         public override List<string> GetAllItemsFromList(string key)
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query =
-$@"select `Value` from `{_storage.SchemaName}`.List 
-where `Key` = @key
-order by `Id` desc";
-
-            return _storage.UseConnection(_dedicatedConnection, connection => connection.Query<string>(query, new { key = key }, commandTimeout: _storage.CommandTimeout).ToList());
+            return _storage.UseConnection(_dedicatedConnection, connection =>
+            SqlRepository.GetAllItemsFromList(connection, _storage.SchemaName, _storage.CommandTimeout, key));
         }
 
         private DbConnection _dedicatedConnection;

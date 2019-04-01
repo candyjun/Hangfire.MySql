@@ -1,11 +1,8 @@
+using Hangfire.Storage;
 using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Diagnostics;
-using System.Threading;
-using Dapper;
-using Hangfire.Annotations;
-using Hangfire.Storage;
 
 namespace Hangfire.MySql
 {
@@ -52,21 +49,7 @@ namespace Hangfire.MySql
 
             do
             {
-                var parameters = new DynamicParameters();
-                parameters.Add("@Resource", resource);
-                parameters.Add("@DbPrincipal", "public");
-                parameters.Add("@LockMode", LockMode);
-                parameters.Add("@LockOwner", LockOwner);
-                parameters.Add("@LockTimeout", lockTimeout);
-                parameters.Add("@Result", dbType: DbType.Int32, direction: ParameterDirection.ReturnValue);
-
-                connection.Execute(
-                    @"GET_LOCK",
-                    parameters,
-                    commandTimeout: (int) (lockTimeout / 1000) + 5,
-                    commandType: CommandType.StoredProcedure);
-
-                var lockResult = parameters.Get<int>("@Result");
+                var lockResult = SqlRepository.AcquireLock(connection,resource,lockTimeout,LockMode,LockOwner);
 
                 if (lockResult >= 0)
                 {
@@ -86,17 +69,7 @@ namespace Hangfire.MySql
 
         internal static void Release(IDbConnection connection, string resource)
         {
-            var parameters = new DynamicParameters();
-            parameters.Add("@Resource", resource);
-            parameters.Add("@LockOwner", LockOwner);
-            parameters.Add("@Result", dbType: DbType.Int32, direction: ParameterDirection.ReturnValue);
-
-            connection.Execute(
-                @"RELEASE_LOCK",
-                parameters,
-                commandType: CommandType.StoredProcedure);
-
-            var releaseResult = parameters.Get<int>("@Result");
+            var releaseResult = SqlRepository.ReleaseLock(connection, resource, LockOwner);
 
             if (releaseResult < 0)
             {

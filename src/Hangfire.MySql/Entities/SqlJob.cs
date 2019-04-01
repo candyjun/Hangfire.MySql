@@ -2,7 +2,7 @@ using System;
 
 namespace Hangfire.MySql.Entities
 {
-    internal class SqlJob
+    public class SqlJob
     {
         public long Id { get; set; }
         public string InvocationData { get; set; }

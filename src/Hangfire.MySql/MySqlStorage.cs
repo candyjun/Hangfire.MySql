@@ -1,4 +1,3 @@
-using Dapper;
 using Hangfire.Annotations;
 using Hangfire.Dashboard;
 using Hangfire.Logging;
@@ -41,11 +40,9 @@ namespace Hangfire.MySql
         public MySqlStorage(string nameOrConnectionString, MySqlStorageOptions options)
         {
             if (nameOrConnectionString == null) throw new ArgumentNullException(nameof(nameOrConnectionString));
-            if (options == null) throw new ArgumentNullException(nameof(options));
-
             _connectionString = GetConnectionString(nameOrConnectionString);
             _connectionFactory = () => new MySqlConnection(_connectionString);
-            _options = options;
+            _options = options ?? throw new ArgumentNullException(nameof(options));
 
             Initialize();
         }
@@ -67,11 +64,8 @@ namespace Hangfire.MySql
         /// </summary>
         public MySqlStorage([NotNull] DbConnection existingConnection, [NotNull] MySqlStorageOptions options)
         {
-            if (existingConnection == null) throw new ArgumentNullException(nameof(existingConnection));
-            if (options == null) throw new ArgumentNullException(nameof(options));
-
-            _existingConnection = existingConnection;
-            _options = options;
+            _existingConnection = existingConnection ?? throw new ArgumentNullException(nameof(existingConnection));
+            _options = options ?? throw new ArgumentNullException(nameof(options));
 
             Initialize();
         }
@@ -93,11 +87,8 @@ namespace Hangfire.MySql
         /// </summary>
         public MySqlStorage([NotNull] Func<DbConnection> connectionFactory, [NotNull] MySqlStorageOptions options)
         {
-            if (connectionFactory == null) throw new ArgumentNullException(nameof(connectionFactory));
-            if (options == null) throw new ArgumentNullException(nameof(options));
-
-            _connectionFactory = connectionFactory;
-            _options = options;
+            _connectionFactory = connectionFactory ?? throw new ArgumentNullException(nameof(connectionFactory));
+            _options = options ?? throw new ArgumentNullException(nameof(options));
 
             Initialize();
         }
@@ -284,18 +275,11 @@ namespace Hangfire.MySql
             "Metrics_ActiveConnections",
             page =>
             {
-                var sqlStorage = page.Storage as MySqlStorage;
-                if (sqlStorage == null) return new Metric("???");
+                if (!(page.Storage is MySqlStorage sqlStorage)) return new Metric("???");
 
                 return sqlStorage.UseConnection(null, connection =>
                 {
-                    var sqlQuery = @"
-select count(*) from sys.sysprocesses
-where dbid = db_id(@name) and status != 'background' and status != 'sleeping'";
-
-                    var value = connection
-                        .Query<int>(sqlQuery, new { name = connection.Database })
-                        .Single();
+                    var value = SqlRepository.GetActiveConnections(connection);
 
                     return new Metric(value);
                 });
@@ -306,18 +290,11 @@ where dbid = db_id(@name) and status != 'background' and status != 'sleeping'";
             "Metrics_TotalConnections",
             page =>
             {
-                var sqlStorage = page.Storage as MySqlStorage;
-                if (sqlStorage == null) return new Metric("???");
+                if (!(page.Storage is MySqlStorage sqlStorage)) return new Metric("???");
 
                 return sqlStorage.UseConnection(null, connection =>
                 {
-                    var sqlQuery = @"
-select count(*) from sys.sysprocesses
-where dbid = db_id(@name) and status != 'background'";
-
-                    var value = connection
-                        .Query<int>(sqlQuery, new { name = connection.Database })
-                        .Single();
+                    var value = SqlRepository.GetTotalConnections(connection);
 
                     return new Metric(value);
                 });

@@ -2,7 +2,7 @@
 
 namespace Hangfire.MySql.Entities
 {
-    internal class SqlState
+    public class SqlState
     {
         public long JobId { get; set; }
         public string Name { get; set; }

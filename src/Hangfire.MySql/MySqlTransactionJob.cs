@@ -1,9 +1,8 @@
-﻿using System;
+﻿using Hangfire.Annotations;
+using Hangfire.Storage;
+using System;
 using System.Data;
 using System.Threading;
-using Dapper;
-using Hangfire.Annotations;
-using Hangfire.Storage;
 
 namespace Hangfire.MySql
 {
@@ -29,18 +28,12 @@ namespace Hangfire.MySql
             string jobId, 
             string queue)
         {
-            if (storage == null) throw new ArgumentNullException(nameof(storage));
-            if (connection == null) throw new ArgumentNullException(nameof(connection));
-            if (transaction == null) throw new ArgumentNullException(nameof(transaction));
-            if (jobId == null) throw new ArgumentNullException(nameof(jobId));
-            if (queue == null) throw new ArgumentNullException(nameof(queue));
+            _storage = storage ?? throw new ArgumentNullException(nameof(storage));
+            _connection = connection ?? throw new ArgumentNullException(nameof(connection));
+            _transaction = transaction ?? throw new ArgumentNullException(nameof(transaction));
 
-            _storage = storage;
-            _connection = connection;
-            _transaction = transaction;
-
-            JobId = jobId;
-            Queue = queue;
+            JobId = jobId ?? throw new ArgumentNullException(nameof(jobId));
+            Queue = queue ?? throw new ArgumentNullException(nameof(queue));
 
             if (!_storage.IsExistingConnection(_connection))
             {
@@ -86,7 +79,7 @@ namespace Hangfire.MySql
             {
                 try
                 {
-                    _connection?.Execute("SELECT 1;", transaction: _transaction);
+                    SqlRepository.ExecuteKeepAliveQuery(_connection, _transaction);
                 }
                 catch
                 {

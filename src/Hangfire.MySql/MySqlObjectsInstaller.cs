@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Data.Common;
 using System.IO;
-using System.Linq;
 using System.Reflection;
 using Dapper;
 using Hangfire.Logging;
@@ -11,7 +10,6 @@ namespace Hangfire.MySql
     public static class MySqlObjectsInstaller
     {
         public static readonly int RequiredSchemaVersion = 5;
-        private const int RetryAttempts = 3;
 
         public static void Install(DbConnection connection)
         {

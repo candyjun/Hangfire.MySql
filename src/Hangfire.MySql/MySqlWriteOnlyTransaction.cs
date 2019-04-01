@@ -1,12 +1,11 @@
-using System;
-using System.Collections.Generic;
-using System.Data.Common;
-using Dapper;
 using Hangfire.Annotations;
 using Hangfire.Common;
 using Hangfire.States;
 using Hangfire.Storage;
 using MySql.Data.MySqlClient;
+using System;
+using System.Collections.Generic;
+using System.Data.Common;
 
 namespace Hangfire.MySql
 {
@@ -32,14 +31,14 @@ namespace Hangfire.MySql
         {
             _storage.UseTransaction(_dedicatedConnectionFunc(), (connection, transaction) =>
             {
-                using (var commandBatch = new SqlCommandBatch(preferBatching: _storage.CommandBatchMaxTimeout.HasValue))
+                using (var commandBatch = new SqlCommandBatch())
                 {
-                    commandBatch.Append("set xact_abort on;set nocount on;");
+                    commandBatch.Append(SqlRepository.GetSetXactNoCountSql());
 
                     foreach (var lockedResource in _lockedResources)
                     {
                         commandBatch.Append(
-                            "exec GET_LOCK @Resource=@resource, @LockMode=N'Exclusive'",
+                            SqlRepository.GetLockedResourceSql(),
                             new MySqlParameter("@resource", lockedResource));
                     }
 
@@ -71,7 +70,7 @@ namespace Hangfire.MySql
         public override void ExpireJob(string jobId, TimeSpan expireIn)
         {
             QueueCommand(
-                $@"update `{_storage.SchemaName}`.Job set ExpireAt = @expireAt where Id = @id",
+                SqlRepository.GetExpireJobSql(_storage.SchemaName),
                 new MySqlParameter("@expireAt", DateTime.UtcNow.Add(expireIn)),
                 new MySqlParameter("@id", long.Parse(jobId)));
         }
@@ -84,16 +83,13 @@ namespace Hangfire.MySql
         public override void PersistJob(string jobId)
         {
             QueueCommand(
-                $@"update `{_storage.SchemaName}`.Job set ExpireAt = NULL where Id = @id",
+                SqlRepository.GetPersistJobSql(_storage.SchemaName),
                 new MySqlParameter("@id", long.Parse(jobId)));
         }
 
         public override void SetJobState(string jobId, IState state)
         {
-            string addAndSetStateSql = 
-$@"insert into `{_storage.SchemaName}`.State (JobId, Name, Reason, CreatedAt, Data)
-values (@jobId, @name, @reason, @createdAt, @data);
-update `{_storage.SchemaName}`.Job set StateId = SCOPE_IDENTITY(), StateName = @name where Id = @id;";
+            string addAndSetStateSql = SqlRepository.GetSetJobStateSql(_storage.SchemaName);
 
             QueueCommand(addAndSetStateSql,
                 new MySqlParameter("@jobId", long.Parse(jobId)),
@@ -106,9 +102,7 @@ update `{_storage.SchemaName}`.Job set StateId = SCOPE_IDENTITY(), StateName = @
 
         public override void AddJobState(string jobId, IState state)
         {
-            string addStateSql =
-$@"insert into `{_storage.SchemaName}`.State (JobId, Name, Reason, CreatedAt, Data)
-values (@jobId, @name, @reason, @createdAt, @data)";
+            string addStateSql = SqlRepository.GetAddJobStateSql(_storage.SchemaName);
 
             QueueCommand(addStateSql,
                 new MySqlParameter("@jobId", long.Parse(jobId)),
@@ -138,7 +132,7 @@ values (@jobId, @name, @reason, @createdAt, @data)";
         public override void IncrementCounter(string key)
         {
             QueueCommand(
-                $@"insert into `{_storage.SchemaName}`.Counter (`Key`, `Value`) values (@key, @value)",
+                SqlRepository.GetCounterSql(_storage.SchemaName),
                 new MySqlParameter("@key", key),
                 new MySqlParameter("@value", +1));
         }
@@ -146,7 +140,7 @@ values (@jobId, @name, @reason, @createdAt, @data)";
         public override void IncrementCounter(string key, TimeSpan expireIn)
         {
             QueueCommand(
-                $@"insert into `{_storage.SchemaName}`.Counter (`Key`, `Value`, `ExpireAt`) values (@key, @value, @expireAt)",
+                SqlRepository.GetCounterSql(_storage.SchemaName, true),
                 new MySqlParameter("@key", key),
                 new MySqlParameter("@value", +1),
                 new MySqlParameter("@expireAt", DateTime.UtcNow.Add(expireIn)));
@@ -155,7 +149,7 @@ values (@jobId, @name, @reason, @createdAt, @data)";
         public override void DecrementCounter(string key)
         {
             QueueCommand(
-                $@"insert into `{_storage.SchemaName}`.Counter (`Key`, `Value`) values (@key, @value)",
+                SqlRepository.GetCounterSql(_storage.SchemaName),
                 new MySqlParameter("@key", key),
                 new MySqlParameter("@value", -1));
         }
@@ -163,7 +157,7 @@ values (@jobId, @name, @reason, @createdAt, @data)";
         public override void DecrementCounter(string key, TimeSpan expireIn)
         {
             QueueCommand(
-                $@"insert into `{_storage.SchemaName}`.Counter (`Key`, `Value`, `ExpireAt`) values (@key, @value, @expireAt)",
+                SqlRepository.GetCounterSql(_storage.SchemaName, true),
                 new MySqlParameter("@key", key),
                 new MySqlParameter("@value", -1),
                 new MySqlParameter("@expireAt", DateTime.UtcNow.Add(expireIn)));
@@ -176,13 +170,7 @@ values (@jobId, @name, @reason, @createdAt, @data)";
 
         public override void AddToSet(string key, string value, double score)
         {
-            string addSql =
-$@";merge `{_storage.SchemaName}`.`Set` as Target
-using (VALUES (@key, @value, @score)) as Source (`Key`, Value, Score)
-on Target.`Key` = Source.`Key` and Target.Value = Source.Value
-when matched then update set Score = Source.Score
-INSERT INTO `{_storage.SchemaName}`.`Set`(`Key`, Value, Score) values (@key, @value, @score)
-ON DUPLICATE KEY UPDATE Score = @score;";
+            string addSql = SqlRepository.GetAddToSetSql(_storage.SchemaName);
 
             AcquireSetLock();
             QueueCommand(addSql,
@@ -193,7 +181,7 @@ ON DUPLICATE KEY UPDATE Score = @score;";
 
         public override void RemoveFromSet(string key, string value)
         {
-            string query = $@"delete from `{_storage.SchemaName}`.`Set` where `Key` = @key and Value = @value";
+            string query = SqlRepository.GetRemoveFromSetSql(_storage.SchemaName);
 
             AcquireSetLock();
             QueueCommand(query,
@@ -205,7 +193,7 @@ ON DUPLICATE KEY UPDATE Score = @score;";
         {
             AcquireListLock();
             QueueCommand(
-                $@"insert into `{_storage.SchemaName}`.List (`Key`, Value) values (@key, @value);",
+                SqlRepository.GetInsertToListSql(_storage.SchemaName),
                 new MySqlParameter("@key", key),
                 new MySqlParameter("@value", value));
         }
@@ -214,19 +202,14 @@ ON DUPLICATE KEY UPDATE Score = @score;";
         {
             AcquireListLock();
             QueueCommand(
-                $@"delete from `{_storage.SchemaName}`.List where `Key` = @key and Value = @value",
+                SqlRepository.GetRemoveFromListSql(_storage.SchemaName),
                 new MySqlParameter("@key", key),
                 new MySqlParameter("@value", value));
         }
 
         public override void TrimList(string key, int keepStartingFrom, int keepEndingAt)
         {
-            string trimSql =
-$@";with cte as (
-    select row_number() over (order by Id desc) as row_num
-    from `{_storage.SchemaName}`.List
-    where `Key` = @key)
-delete from cte where row_num not between @start and @end";
+            string trimSql = SqlRepository.GetTrimListSql(_storage.SchemaName);
 
             AcquireListLock();
             QueueCommand(trimSql,
@@ -240,12 +223,7 @@ delete from cte where row_num not between @start and @end";
             if (key == null) throw new ArgumentNullException(nameof(key));
             if (keyValuePairs == null) throw new ArgumentNullException(nameof(keyValuePairs));
 
-            string sql =
-$@";merge `{_storage.SchemaName}`.Hash as Target
-using (VALUES (@key, @field, @value)) as Source (`Key`, Field, Value)
-on Target.`Key` = Source.`Key` and Target.Field = Source.Field
-when matched then update set Value = Source.Value
-when not matched then insert (`Key`, Field, Value) values (Source.`Key`, Source.Field, Source.Value);";
+            string sql = SqlRepository.GetSetRangeInHashSql(_storage.SchemaName);
 
             AcquireHashLock();
 
@@ -262,7 +240,7 @@ when not matched then insert (`Key`, Field, Value) values (Source.`Key`, Source.
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query = $@"delete from `{_storage.SchemaName}`.Hash where `Key` = @key";
+            string query = SqlRepository.GetRemoveHashSql(_storage.SchemaName);
 
             AcquireHashLock();
             QueueCommand(query, new MySqlParameter("@key", key));
@@ -274,9 +252,7 @@ when not matched then insert (`Key`, Field, Value) values (Source.`Key`, Source.
             if (items == null) throw new ArgumentNullException(nameof(items));
 
             // TODO: Rewrite using the `MERGE` statement.
-            string query =
-$@"insert into `{_storage.SchemaName}`.`Set` (`Key`, Value, Score)
-values (@key, @value, 0.0)";
+            string query = SqlRepository.GetAddRangeToSetSql(_storage.SchemaName);
 
             AcquireSetLock();
 
@@ -290,7 +266,7 @@ values (@key, @value, 0.0)";
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query = $@"delete from `{_storage.SchemaName}`.`Set` where `Key` = @key";
+            string query = SqlRepository.GetRemoveSetSql(_storage.SchemaName);
 
             AcquireSetLock();
             QueueCommand(query, new MySqlParameter("@key", key));
@@ -300,8 +276,7 @@ values (@key, @value, 0.0)";
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-             string query = $@"
-update `{_storage.SchemaName}`.`Hash` set ExpireAt = @expireAt where `Key` = @key";
+             string query = SqlRepository.GetExpireHashSql(_storage.SchemaName);
 
             AcquireHashLock();
             QueueCommand(query,
@@ -313,8 +288,7 @@ update `{_storage.SchemaName}`.`Hash` set ExpireAt = @expireAt where `Key` = @ke
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query = $@"
-update `{_storage.SchemaName}`.`Set` set ExpireAt = @expireAt where `Key` = @key";
+            string query = SqlRepository.GetExpireSetSql(_storage.SchemaName);
 
             AcquireSetLock();
             QueueCommand(query,
@@ -326,8 +300,7 @@ update `{_storage.SchemaName}`.`Set` set ExpireAt = @expireAt where `Key` = @key
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query = $@"
-update `{_storage.SchemaName}`.`List` set ExpireAt = @expireAt where `Key` = @key";
+            string query = SqlRepository.GetExpireListSql(_storage.SchemaName);
 
             AcquireListLock();
             QueueCommand(query,
@@ -339,8 +312,7 @@ update `{_storage.SchemaName}`.`List` set ExpireAt = @expireAt where `Key` = @ke
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query = $@"
-update `{_storage.SchemaName}`.Hash set ExpireAt = null where `Key` = @key";
+            string query = SqlRepository.GetPersistHashSql(_storage.SchemaName);
 
             AcquireHashLock();
             QueueCommand(query, new MySqlParameter("@key", key));
@@ -350,8 +322,7 @@ update `{_storage.SchemaName}`.Hash set ExpireAt = null where `Key` = @key";
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query = $@"
-update `{_storage.SchemaName}`.`Set` set ExpireAt = null where `Key` = @key";
+            string query = SqlRepository.GetPersistSetSql(_storage.SchemaName);
 
             AcquireSetLock();
             QueueCommand(query, new MySqlParameter("@key", key));
@@ -361,8 +332,7 @@ update `{_storage.SchemaName}`.`Set` set ExpireAt = null where `Key` = @key";
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            string query = $@"
-update `{_storage.SchemaName}`.`List` set ExpireAt = null where `Key` = @key";
+            string query = SqlRepository.GetPersistListSql(_storage.SchemaName);
 
             AcquireListLock();
             QueueCommand(query, new MySqlParameter("@key", key));
